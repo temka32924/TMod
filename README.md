@@ -8,8 +8,8 @@ Nightly builds (Linux and win32 packages) available here: http://rb3.butchers.su
 ##Download
   * Latest development version: http://rb3.butchers.su/ftp/sauer/remod/ (currently offline)
   * Old realeses: http://code.google.com/p/remod-sauerbraten/downloads/list
-  * GIT repository: https://github.com/vasyahuyasa/remod-sauerbraten (recomended).
-  * SVN repository: http://code.google.com/p/remod-sauerbraten/source/checkout SVN repository (recomended).
+  * GIT repository: https://github.com/vasyahuyasa/remod-sauerbraten (recommended).
+  * SVN repository: http://code.google.com/p/remod-sauerbraten/source/checkout SVN repository (recommended).
 
 ##Installation notes and some guides
 ```
