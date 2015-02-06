@@ -68,7 +68,7 @@ endif
 
 CXXFLAGS=-fomit-frame-pointer -Wall -fsigned-char -DSTANDALONE
 
-INCLUDES= -Ishared -Iengine -Ifpsgame -Imod -Imod/hashlib2plus/src -Imod/cryptomod/polarssl/include
+INCLUDES= -Ishared -Iengine -Ifpsgame -Imod -Imod/hashlib2plus/src -Imod/cryptomod/polarssl/include -Imod/cjson
 
 ### Embended ENET
 ifeq ($(ENET_USE_SYSTEM_LIBS),true)
@@ -99,8 +99,11 @@ SERVER_OBJS= \
 	mod/cryptomod/polarssl/library/sha1-standalone.o \
 	mod/cryptomod/polarssl/library/sha2-standalone.o \
 	mod/cryptomod/polarssl/library/sha4-standalone.o \
-      	mod/banlist-standalone.o \
-	mod/jsonbanlist-standalone.o
+    mod/banlist-standalone.o \
+	mod/jsonbanlist-standalone.o \
+	mod/cjson/cJSON-standalone.o \
+	mod/jsonrpc-standalone.o
+	
 
 
 ### Options checks
