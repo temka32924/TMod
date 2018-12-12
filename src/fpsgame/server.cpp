@@ -28,6 +28,66 @@ extern void checkasleep(int millis);
 
 namespace server
 {
+    //MAXIM
+    void physinfo::putposition(clientinfo *ci, int exclude = -1) {
+      packetbuf q(100, ENET_PACKET_FLAG_RELIABLE);
+      if(ci->state.state != CS_ALIVE && ci->state.state != CS_EDITING) return;
+      putint(q, N_POS);
+      putuint(q, ci->clientnum);
+      // 3 bits phys state, 1 bit life sequence, 2 bits move, 2 bits strafe
+      q.put(ci->pos.physstate);
+      ivec io = ivec(vec(o.x+8.2625, o.y, o.z).mul(DMF)); //8.2625 magic num reduces strange x behaviour...
+      uint velo = min(int(vel.magnitude()*DVELF), 0xFFFF), fall = min(int(falling.magnitude()*DVELF), 0xFFFF);
+      // 3 bits position, 1 bit velocity, 3 bits falling, 1 bit material
+      uint flags = 0;
+      if(io.x < 0 || io.x > 0xFFFF) flags |= 1<<0;
+      if(io.y < 0 || io.y > 0xFFFF) flags |= 1<<1;
+      if(io.z < 0 || io.z > 0xFFFF) flags |= 1<<2;
+      if(velo > 0xFF) flags |= 1<<3;
+      if(fall > 0)
+      {
+        flags |= 1<<4;
+        if(fall > 0xFF) flags |= 1<<5;
+        if(falling.x || falling.y || falling.z > 0) flags |= 1<<6;
+      }
+      if(ci->gameclip) flags |= 1<<7;
+      putuint(q, flags);
+      loopk(3) {
+        q.put(io[k]&0xFF);
+        q.put((io[k]>>8)&0xFF);
+        if(io[k] < 0 || io[k] > 0xFFFF) q.put((io[k]>>16)&0xFF);
+      }
+      uint dir = (yaw < 0 ? 360 + int(yaw)%360 : int(yaw)%360) + clamp(int(pitch+90), 0, 180)*360;
+      q.put(dir&0xFF);
+      q.put((dir>>8)&0xFF);
+      q.put(clamp(int(roll+90), 0, 180));
+      q.put(velo&0xFF);
+      if(velo > 0xFF) q.put((velo>>8)&0xFF);
+      float velyaw = -atan2(vel.x, vel.y)/RAD, velpitch = asin(vel.z/vel.magnitude())/RAD;
+      uint veldir = (velyaw < 0 ? 360 + int(velyaw)%360 : int(velyaw)%360) + clamp(int(velpitch+90), 0, 180)*360;
+      q.put(veldir&0xFF);
+      q.put((veldir>>8)&0xFF);
+      if(fall > 0) {
+        q.put(fall&0xFF);
+        if(fall > 0xFF) q.put((fall>>8)&0xFF);
+        if(falling.x || falling.y || falling.z > 0) {
+          float fallyaw = -atan2(falling.x, falling.y)/RAD, fallpitch = asin(falling.z/falling.magnitude())/RAD;
+          uint falldir = (fallyaw < 0 ? 360 + int(fallyaw)%360 : int(fallyaw)%360) + clamp(int(fallpitch+90), 0, 180)*360;
+          q.put(falldir&0xFF);
+          q.put((falldir>>8)&0xFF);
+        }
+      }
+      sendpacket(-1, 0, q.finalize(), exclude);
+      sendpacket(ci->ownernum, 0, q.finalize(), exclude);
+    }
+    VAR(checkpoints, 0, 0, 1);
+    VAR(checkpointsdist, 0, 32, 0xFFFF);
+    _VAR(finishes, finishes, 0, 0, INT_MAX, IDF_READONLY);
+    int shotpushinit[NUMGUNS] = {0};
+    int hitpushinit[NUMGUNS] = {0};
+    int ammoinit[NUMGUNS] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    int damageinit[NUMGUNS] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+
     bool notgotitems = true;        // true when map has changed and waiting for clients to send item
     int gamemode = 0;
 
@@ -78,6 +138,9 @@ namespace server
         bannedips.add(b);
     }
 
+
+	//MAXIM
+	vector<uchar> entbuf;
     vector<clientinfo *> connects, clients, bots;
 
     // remod
@@ -425,6 +488,7 @@ namespace server
     {
         mcrc = 0;
         ments.setsize(0);
+		entbuf.setsize(0);
         sents.setsize(0);
         //cps.reset();
     }
@@ -1448,6 +1512,20 @@ namespace server
             addmessages(ws, wsbuf, mtu, ci, ci);
             loopvj(ci.bots) addmessages(ws, wsbuf, mtu, *ci.bots[j], ci);
         }
+
+		if (!entbuf.empty()) {
+			loopv(clients) {
+				clientinfo &ci = *clients[i];
+				if(ci.state.aitype != AI_NONE) continue;
+				packetbuf q(entbuf.length(), ENET_PACKET_FLAG_RELIABLE); 
+				putuint(q, N_CLIENT); 
+				putint(q, ci.clientnum); 
+				putuint(q, entbuf.length()); 
+				q.put(entbuf.getbuf(), entbuf.length());
+				sendpacket(ci.clientnum, 1, q.finalize());
+			}
+			entbuf.setsize(0);
+		}
         sendmessages(ws, wsbuf);
         reliablemessages = false;
         if(ws.uses) return true;
@@ -1489,6 +1567,13 @@ namespace server
     {
         gamestate &gs = ci->state;
         spawnstate(ci);
+        //MAXIM
+        loopi(NUMGUNS) {
+          if (ci->weapons.ammo[i]>=0) {
+            gs.ammo[i] = ci->weapons.ammo[i];
+          }
+        }
+
         sendf(ci->ownernum, 1, "rii7v", N_SPAWNSTATE, ci->clientnum, gs.lifesequence,
             gs.health, gs.maxhealth,
             gs.armour, gs.armourtype,
@@ -1504,6 +1589,25 @@ namespace server
         packetbuf p(MAXTRANS, ENET_PACKET_FLAG_RELIABLE);
         int chan = welcomepacket(p, ci);
         sendpacket(ci->clientnum, chan, p.finalize());
+
+		//MAXIM
+		vector<uchar> buf;
+		loopv(ments) {
+			entity &e = ments[i];
+			if (e.serverside) {
+				#define P(data) putint(buf, data);				
+				P(N_EDITENT) P(i) P((int)(e.o.x*DMF)) P((int)(e.o.y*DMF)) P((int)(e.o.z*DMF))
+				P(e.type) P(e.attr1) P(e.attr2) P(e.attr3) P(e.attr4) P(e.attr5)
+				#undef P
+			}
+		}
+		if (buf.empty()) return;
+		packetbuf q(buf.length(), ENET_PACKET_FLAG_RELIABLE); 
+		putuint(q, N_CLIENT); 
+		putint(q, ci->clientnum); 
+		putuint(q, buf.length()); 
+		q.put(buf.getbuf(), buf.length());
+		sendpacket(ci->clientnum, 1, q.finalize());
     }
 
     void putinitclient(clientinfo *ci, packetbuf &p)
@@ -1657,6 +1761,7 @@ namespace server
             putint(p, -1);
             welcomeinitclient(p, ci ? ci->clientnum : -1);
         }
+
         if(smode) smode->initclient(ci, p, true);
         return 1;
     }
@@ -1691,21 +1796,32 @@ namespace server
         sendpacket(-1, 1, p.finalize(), ci->clientnum);
     }
 
+    //MAXIM
+    vector<vec> flags;
+
     void loaditems()
     {
         resetitems();
         notgotitems = true;
         // remod
-        if(m_edit || !remod::loadents(smapname, ments, &mcrc))
+        if(/*m_edit || */!remod::loadents(smapname, ments, &mcrc))
             return;
-        loopv(ments) if(canspawnitem(ments[i].type))
-        {
-            server_entity se = { NOTUSED, 0, false };
-            while(sents.length()<=i) sents.add(se);
-            sents[i].type = ments[i].type;
-            if(m_mp(gamemode) && delayspawn(sents[i].type)) sents[i].spawntime = spawntime(sents[i].type);
-            else sents[i].spawned = true;
-        }
+		flags.shrink(0);
+		finishes = 0;
+        loopv(ments) {
+			if(canspawnitem(ments[i].type))
+        	{
+            	server_entity se = { NOTUSED, 0, false };
+            	while(sents.length()<=i) sents.add(se);
+            	sents[i].type = ments[i].type;
+            	if(m_mp(gamemode) && delayspawn(sents[i].type)) sents[i].spawntime = spawntime(sents[i].type);
+            	else sents[i].spawned = true;
+        	}
+			if (ments[i].type == FLAG) {
+				flags.add(ments[i].o);
+				finishes++;
+        	}
+		}
         notgotitems = false;
     }
 
@@ -1730,6 +1846,7 @@ namespace server
         nextexceeded = 0;
         copystring(smapname, s);
         loaditems();
+
         scores.shrink(0);
         shouldcheckteamkills = false;
         teamkills.shrink(0);
@@ -1900,7 +2017,7 @@ namespace server
         if(gamemillis >= gamelimit && !interm)
         {
             //remod
-            if(overtime && (m_teammode ? remod::isteamsequalscore() : remod::isplayerssequalscore()))
+            if(overtime && m_teammode && remod::isteamsequalscore())
             {
                 if(m_timed && smapname[0])
                 {
@@ -1925,6 +2042,9 @@ namespace server
 
     void dodamage(clientinfo *target, clientinfo *actor, int damage, int gun, const vec &hitpush = vec(0, 0, 0))
     {
+        //MAXIM
+        if (actor->weapons.damage[gun] >= 0) damage = actor->weapons.damage[gun];
+
         // remod
         if(m_edit && nodamage == 1) return;
         actor->state.ext.guninfo[gun].damage += damage;
@@ -1937,7 +2057,7 @@ namespace server
         else if(!hitpush.iszero())
         {
             ivec v = vec(hitpush).rescale(DNF);
-            sendf(ts.health<=0 ? -1 : target->ownernum, 1, "ri7", N_HITPUSH, target->clientnum, gun, damage, v.x, v.y, v.z);
+            sendf(ts.health<=0 ? -1 : target->ownernum, 1, "ri7", N_HITPUSH, target->clientnum, gun, /*MAXIM*/ actor->weapons.hitpush[gun] != 0 ? actor->weapons.hitpush[gun] : damage, v.x, v.y, v.z);
             target->setpushed();
         }
         if(ts.health<=0)
@@ -2074,6 +2194,22 @@ namespace server
                 int(to.x*DMF), int(to.y*DMF), int(to.z*DMF),
                 ci->ownernum);
         gs.shotdamage += guns[gun].damage*(gs.quadmillis ? 4 : 1)*guns[gun].rays;
+
+        //MAXIM
+        //Для получения угла выстрела: делим вектор to на from, затем нормируем.
+        if (ci->weapons.shotpush[gun] != 0) {
+          ivec dir;
+          if (to != from) dir = to.sub(from).normalize().rescale(DNF);
+          else
+            dir = vec(
+             -sinf(RAD*ci->pos.yaw)*cosf(RAD*ci->pos.pitch),
+             cosf(RAD*ci->pos.yaw)*cosf(RAD*ci->pos.pitch),
+             sinf(RAD*ci->pos.pitch)).rescale(DNF);
+          if (!dir.iszero()) {
+            sendf(-1, 1, "ri7", N_HITPUSH, ci->clientnum, gun, ci->weapons.shotpush[gun], dir.x, dir.y, dir.z);
+            ci->setpushed();
+          }
+        }
 
         // remod
         gs.ext.guninfo[gun].shotdamage += guns[gun].damage*(gs.quadmillis ? 4 : 1)*guns[gun].rays;
@@ -2782,10 +2918,11 @@ namespace server
         int curmsg;
         while((curmsg = p.length()) < p.maxlen) switch(type = checktype(getint(p), ci))
         {
+            //MAXIM
             case N_POS:
             {
                 int pcn = getuint(p);
-                p.get();
+                uchar physstate = p.get();
                 uint flags = getuint(p);
                 clientinfo *cp = getinfo(pcn);
                 if(cp && pcn != sender && cp->ownernum != sender) cp = NULL;
@@ -2795,15 +2932,26 @@ namespace server
                     int n = p.get(); n |= p.get()<<8; if(flags&(1<<k)) { n |= p.get()<<16; if(n&0x800000) n |= -1<<24; }
                     pos[k] = n/DMF;
                 }
-                loopk(3) p.get();
-                int mag = p.get(); if(flags&(1<<3)) mag |= p.get()<<8;
                 int dir = p.get(); dir |= p.get()<<8;
-                vec vel = vec((dir%360)*RAD, (clamp(dir/360, 0, 180)-90)*RAD).mul(mag/DVELF);
+                float yaw, pitch, roll;
+                yaw = dir%360;
+                pitch = clamp(dir/360, 0, 180)-90;
+                roll = clamp(int(p.get()), 0, 180)-90;
+                int mag = p.get(); if(flags&(1<<3)) mag |= p.get()<<8;
+                dir = p.get(); dir |= p.get()<<8;
+                vec vel, falling;
+                vel = vec((dir%360)*RAD, (clamp(dir/360, 0, 180)-90)*RAD).mul(mag/DVELF);
                 if(flags&(1<<4))
                 {
-                    p.get(); if(flags&(1<<5)) p.get();
-                    if(flags&(1<<6)) loopk(2) p.get();
-                }
+                    mag = p.get(); if(flags&(1<<5)) mag |= p.get()<<8;
+                    if(flags&(1<<6)) {
+                      dir = p.get();
+                      dir |= p.get()<<8;
+                    }
+                    else falling = vec(0, 0, -1);
+                    falling = vec((dir%360)*RAD, (clamp(dir/360, 0, 180)-90)*RAD).mul(mag/DVELF);
+                } else falling = vec(0, 0, 0);
+
                 if(cp)
                 {
                     if((!ci->local || demorecord || hasnonlocalclients()) && (cp->state.state==CS_ALIVE || cp->state.state==CS_EDITING))
@@ -2814,12 +2962,43 @@ namespace server
                         while(curmsg<p.length()) cp->position.add(p.buf[curmsg++]);
                     }
                     if(smode && cp->state.state==CS_ALIVE) smode->moved(cp, cp->state.o, cp->gameclip, pos, (flags&0x80)!=0);
-                    cp->state.o = pos;
-                    cp->gameclip = (flags&0x80)!=0;
+                    vec deltapos = cp->state.o;
+                    cp->pos.physstate = physstate;
+                    cp->state.o = cp->pos.o = pos;
+                    cp->pos.yaw = yaw;
+                    cp->pos.pitch = pitch;
+                    cp->pos.roll = roll;
+                    cp->pos.vel = vel;
+                    cp->gameclip = cp->pos.gameclip = (flags&0x80)!=0;
+                    cp->pos.falling=falling;
+                    if (!checkpoints) break;
+                    if (deltapos == pos && pos.dist(cp->saved.o) > checkpointsdist) {
+                      cp->saved = cp->pos;
+                      if (cp->state.aitype != AI_NONE) break;
+                      sendf(cp->clientnum, 1, "ri5", N_CLIENT, cp->clientnum, 2, N_SOUND, 59);
+                    }
                 }
                 break;
             }
+			
+			case N_TAUNT:
+			{
+				remod::onevent(ONTAUNT, "i", ci->clientnum);
+				QUEUE_AI;
+				QUEUE_MSG;
+			break;
+			}
 
+			case N_SOUND:
+			{
+				int stype = getint(p);
+				if (stype == S_JUMP) remod::onevent(ONJUMP, "i", ci->clientnum);
+				else if (stype == S_LAND) remod::onevent(ONLAND, "i", ci->clientnum);
+				QUEUE_AI;
+				QUEUE_MSG;
+			break;
+			}
+			
             case N_TELEPORT:
             {
                 int pcn = getint(p), teleport = getint(p), teledest = getint(p);
@@ -2828,6 +3007,7 @@ namespace server
                 if(cp && (!ci->local || demorecord || hasnonlocalclients()) && (cp->state.state==CS_ALIVE || cp->state.state==CS_EDITING))
                 {
                     flushclientposition(*cp);
+					remod::onevent(ONTELEPORT, "i", pcn);
                     sendf(-1, 0, "ri4x", N_TELEPORT, pcn, teleport, teledest, cp->ownernum);
                 }
                 break;
@@ -2959,6 +3139,13 @@ namespace server
 
             case N_SUICIDE:
             {
+                //MAXIM
+                if (checkpoints) {
+                  cq->saved.putposition(cq);
+                  if (cq->state.aitype != AI_NONE) break;
+                  sendf(cq->clientnum, 1, "ri5", N_CLIENT, cq->clientnum, 2, N_SOUND, 69);
+                  break;
+                }
                 if(cq) cq->addevent(new suicideevent);
                 break;
             }
@@ -2984,6 +3171,7 @@ namespace server
                 }
                 if(cq)
                 {
+					remod::onevent(ONSHOOT, "ifff", cq->clientnum, shot->to.x, shot->to.y, shot->to.z);
                     cq->addevent(shot);
                     cq->setpushed();
                 }
@@ -3021,6 +3209,7 @@ namespace server
                 pickupevent *pickup = new pickupevent;
                 pickup->ent = n;
                 cq->addevent(pickup);
+                //remod::onevent(ONITEMPICKUP, "ii", sender, n);
                 break;
             }
 
@@ -3046,16 +3235,16 @@ namespace server
 
                 if(remod::checkmutemode(ci))
                 {
-                    remod::onevent(ONMUTEMODETRIGGER, "i", sender);
+                    remod::onevent(ONMUTEMODETRIGGER, "is", sender, text);
                     break;
                 }
 
                 if(ci->state.ext.muted)
                 {
                     // call event not often that every 5 seconds
-                    if(totalmillis - ci->state.ext.lastmutetrigger >= 5*1000)
+                    if(totalmillis - ci->state.ext.lastmutetrigger >= 100)
                     {
-                        remod::onevent(ONMUTETRIGGER, "i", ci->clientnum);
+                        remod::onevent(ONMUTETRIGGER, "is", ci->clientnum, text);
                         ci->state.ext.lastmutetrigger = totalmillis;
                     }
                     break;
@@ -3082,15 +3271,15 @@ namespace server
                 if(remod::checkflood(ci, type)) break;
                 if(remod::checkmutemode(ci))
                 {
-                    remod::onevent(ONMUTEMODETRIGGER, "i", sender);
+                    remod::onevent(ONMUTEMODETRIGGER, "is", sender, text);
                     break;
                 }
                 if(ci->state.ext.muted)
                 {
                     // call event not often that every 5 seconds
-                    if(totalmillis - ci->state.ext.lastmutetrigger >= 5*1000)
+                    if(totalmillis - ci->state.ext.lastmutetrigger >= 100)
                     {
-                        remod::onevent(ONMUTETRIGGER, "i", ci->clientnum);
+                        remod::onevent(ONMUTETRIGGER, "is", ci->clientnum, text);
                         ci->state.ext.lastmutetrigger = totalmillis;
                     }
                     break;
@@ -3116,6 +3305,8 @@ namespace server
 
                 //remod
                 if(remod::checkflood(ci, N_SWITCHNAME)) break;
+				
+				if (ci->namemute) {remod::rename(ci->clientnum, ci->name); break;}
 
                 string oldname;
                 copystring(oldname, ci->name);
@@ -3171,7 +3362,6 @@ namespace server
             {
                 getstring(text, p);
                 filtertext(text, text, false);
-                fixmapname(text);
                 int reqmode = getint(p);
                 vote(text, reqmode, sender);
                 break;
@@ -3199,15 +3389,60 @@ namespace server
             case N_EDITENT:
             {
                 int i = getint(p);
-                loopk(3) getint(p);
+				//int skippos = p.length(); //Current possition in packet
+                vec o;
+				loopk(3) {o[k] = getint(p)/DMF;}
                 int type = getint(p);
-                loopk(5) getint(p);
+                int attr[5];
+				loopk(5) {attr[k] = getint(p);}
                 if(!ci || ci->state.state==CS_SPECTATOR) break;
 
                 // remod
-                if(ci->state.ext.ghost) break;
+                if(ci->state.ext.ghost || (i>MAXENTS || i<0)) break;
+				if (ments.inrange(i)) {
+					if (ments[i].serverside) {
+						entity &e = ments[i];
+						vector<uchar> buf;
+						#define P(data) putint(buf, data);
+						P(N_EDITENT) P(i) P((int)(e.o.x*DMF)) P((int)(e.o.y*DMF)) P((int)(e.o.z*DMF))
+						P(e.type) P(e.attr1) P(e.attr2) P(e.attr3) P(e.attr4) P(e.attr5) //Отправляем отказ в изменениях
 
+						/*while (ments.inrange(i)) {
+							if (ments[i].serverside || ments[i].type != ET_EMPTY) i++; 
+							else break;
+						} 
+						if (!ments.inrange(i)) ments.add(); 
+						//Ищем место в массиве для нового энта
+	
+						P(N_EDITENT) P(i) P((int)(o.x*DMF)) P((int)(o.y*DMF)) P((int)(o.z*DMF)) 
+						P(type) P(attr[0]) P(attr[1]) P(attr[2]) P(attr[3]) P(attr[4]) //Перенаправляем его изменения на новый(свободный) энт*/
+						packetbuf q(MAXTRANS, ENET_PACKET_FLAG_RELIABLE); 
+						putuint(q, N_CLIENT); 
+						putint(q, ci->clientnum); 
+						putuint(q, buf.length()); 
+						q.put(buf.getbuf(), buf.length());
+						sendpacket(ci->ownernum, 1, q.finalize());
+						#undef P	
+
+						/**/ break; /**/
+										
+					}
+				} else {
+					while(ments.length() < i) ments.add().type = ET_EMPTY;
+					ments.add();					
+				}
+
+				remod::onevent(ONEDITENT, "iifffiiiiii", sender, i, o.x, o.y, o.z, type, attr[0], attr[1], attr[2], attr[3], attr[4]);
+
+				entity &e = ments[i];
+				e.type = type; e.o.x = o.x; e.o.y = o.y; e.o.z = o.z; e.attr1 = attr[0]; 
+				e.attr2 = attr[1]; e.attr3 = attr[2]; e.attr4 = attr[3]; e.attr5 = attr[4]; 
+
+				/*QUEUE_INT(N_EDITENT);
+				QUEUE_INT(i);
+				curmsg = skippos;*/
                 QUEUE_MSG;
+
                 bool canspawn = canspawnitem(type);
                 if(i<MAXENTS && (sents.inrange(i) || canspawnitem(type)))
                 {
@@ -3616,6 +3851,203 @@ namespace server
         }
     }
 
+    //MAXIM ADDITIONAL
+    void sound(int target, int actor, int num) {
+      clientinfo *t = getinfo(target);
+      if (target != -1 && (!t || t->state.aitype!=AI_NONE)) return;
+      clientinfo *a = getinfo(actor);
+      if (!a) return;
+      sendf(target, 1, "ri5", N_CLIENT, actor, 2, N_SOUND, num);
+    }
+    void dodamage(short int cn, int damage, signed char type = 0) {
+      if (!damage) return;
+      clientinfo *ci = getinfo(cn);
+      if (!ci || ci->state.state==CS_DEAD || ci->state.state==CS_SPECTATOR) return;
+      gamestate &ts = ci->state;
+      switch (type) {
+        case 1:
+          ts.health -= damage;
+          break;
+        case 2:
+          ts.armour = ts.armour - damage > 0 ? ts.armour - damage : 0;
+          break;
+        case 3:
+          ts.health -= damage;
+          ts.armour = ts.armour - damage > 0 ? ts.armour - damage : 0;
+          break;
+        default:
+        ts.dodamage(damage);
+      }
+      sendf(-1, 1, "ri6", N_DAMAGE, ci->clientnum, ci->clientnum, damage > 0 ? damage : 0, ts.armour, ts.health);
+      if(ts.health<=0) {
+        ts.deaths++;
+        ts.frags--;
+        teaminfo *t = m_teammode ? teaminfos.access(ci->team) : NULL;
+        if(t) t->frags--;
+        sendf(-1, 1, "ri5", N_DIED, ci->clientnum, ci->clientnum, ts.frags, t ? t->frags : 0);
+        ci->position.setsize(0);
+        if(smode) smode->died(ci, ci);
+        ts.state = CS_DEAD;
+        ts.lastdeath = gamemillis;
+        ts.deadflush = ts.lastdeath + DEATHMILLIS;
+        remod::addSuicide(ci);
+        remod::onevent(ONSUICIDE,  "i", ci->clientnum);
+      }
+    }
+    ICOMMAND(getfinish, "i", (int *num), {
+        if (*num < 0 || *num >= finishes) return;
+        defformatstring(res, "%s %s %s", floatstr(flags[*num].x), floatstr(flags[*num].y), floatstr(flags[*num].z));
+        result(res);
+      }
+    );
+    ICOMMAND(sound, "iii", (int *t, int *a, int *n), {sound(*t,*a,*n);});
+    ICOMMAND(dodamage, "iii", (short int *cn, int *damage, signed char *type), dodamage(*cn, *damage, *type));
+    ICOMMAND(setpush, "iiii", (int *cn, int *gun, int *shotpush, int *hitpush), {
+        if (*gun >= NUMGUNS || *gun < 0) return;
+        if (*cn < 0) {
+          shotpushinit[*gun] = *shotpush;
+          hitpushinit[*gun] = *hitpush;
+          loopv(clients) {
+            clientinfo *ci = clients[i];
+            ci->weapons.shotpush[*gun] = *shotpush;
+            ci->weapons.hitpush[*gun] = *hitpush;
+          }
+          return;
+        }
+        clientinfo *ci = getinfo(*cn);
+        if (!ci) return;
+        ci->weapons.shotpush[*gun] = *shotpush;
+        ci->weapons.hitpush[*gun] = *hitpush;
+      }
+    );
+    ICOMMAND(getpush, "ii", (int* cn, int *gun), {
+      if (*gun >= NUMGUNS || *gun < 0) return;
+      if (*cn < 0) {
+        defformatstring(res, "%s %s", intstr(shotpushinit[*gun]), intstr(hitpushinit[*gun]));
+        result(res);
+        return;
+      }
+      clientinfo *ci = getinfo(*cn);
+      if (!ci) return;
+      defformatstring(res, "%s %s", intstr(ci->weapons.shotpush[*gun]), intstr(ci->weapons.hitpush[*gun]));
+      result(res);
+    });
+    ICOMMAND(setammo, "iii", (int *cn, int *gun, int *ammo), {
+        if (*gun >= NUMGUNS || *gun < 0) return;
+        if (*cn < 0) {
+          ammoinit[*gun] = *ammo;
+          loopv(clients) {
+            clientinfo *ci = clients[i];
+            ci->weapons.ammo[*gun] = *ammo;
+          }
+          return;
+        }
+        clientinfo *ci = getinfo(*cn);
+        if (!ci) return;
+        ci->weapons.ammo[*gun] = *ammo;
+      }
+    );
+    ICOMMAND(getspawnammo, "ii", (int *cn, int *gun), {
+        if (*gun >= NUMGUNS || *gun < 0) return;
+        if (*cn < 0) {
+          intret(ammoinit[*gun]);
+          return;
+        }
+        clientinfo *ci = getinfo(*cn);
+        if (!ci) return;
+        intret(ci->weapons.ammo[*gun]);
+      );
+    }
+    ICOMMAND(setdamage, "iii", (int *cn, int *gun, int *damage), {
+        if (*gun >= NUMGUNS || *gun < 0) return;
+        if (*cn < 0) {
+          damageinit[*gun] = *damage;
+          loopv(clients) {
+            clientinfo *ci = clients[i];
+            ci->weapons.damage[*gun] = *damage;
+          }
+          return;
+        }
+        clientinfo *ci = getinfo(*cn);
+        if (!ci) return;
+        ci->weapons.damage[*gun] = *damage;
+      }
+    );
+    ICOMMAND(getdamage, "ii", (int *cn, int *gun), {
+        if (*gun >= NUMGUNS || *gun < 0) return;
+        if (*cn < 0) {
+          intret(damageinit[*gun]);
+          return;
+        }
+        clientinfo *ci = getinfo(*cn);
+        if (!ci) return;
+        intret(ci->weapons.damage[*gun]);
+      );
+    }
+    ICOMMAND(resetweapons, "", (), {
+        loopv(clients) {
+          clientinfo *ci = clients[i];
+          loopi(NUMGUNS){
+            ci->weapons.shotpush[i] = shotpushinit[i] = 0;
+            ci->weapons.hitpush[i] = hitpushinit[i] = 0;
+            ci->weapons.ammo[i] = ammoinit[i] = -1;
+            ci->weapons.damage[i] = damageinit[i] = -1;
+          }
+        }
+      }
+    );
+    ICOMMAND(gethealth, "i", (int *cn), {
+        clientinfo *ci = getinfo(*cn);
+        if (!ci) return;
+        intret(ci->state.health);
+      }
+    );
+    ICOMMAND(getarmour, "i", (int *cn), {
+        clientinfo *ci = getinfo(*cn);
+        if (!ci) return;
+        intret(ci->state.armour);
+      }
+    );
+    ICOMMAND(getarmourtype, "i", (int *cn), {
+        clientinfo *ci = getinfo(*cn);
+        if (!ci) return;
+        intret(ci->state.armourtype);
+      }
+    );
+    ICOMMAND(getgun, "i", (int *cn), {
+        clientinfo *ci = getinfo(*cn);
+        if (!ci) return;
+        intret(ci->state.gunselect);
+      }
+    );
+    ICOMMAND(setpos, "ifff", (int *cn, float *x, float *y, float *z), {
+        clientinfo *ci = getinfo(*cn);
+        if (!ci) return;
+        ci->pos.o = vec(*x, *y, *z);
+        ci->pos.putposition(ci);
+      }
+    );
+	ICOMMAND(sendgamespeed, "ii", (int *cn, int *speed), sendf(*cn, 1, "riii", N_GAMESPEED, *speed, *cn));
+	ICOMMAND(sendpause, "ii", (int *cn, int *pause), sendf(*cn, 1, "riii", N_PAUSEGAME, *pause, *cn));
+
+	//MAXIM
+	void sendmedia() {
+	stream *media = openrawfile("media.zip", "rb");
+	if (!media) return;
+
+	int len = (int)min(media->size(), stream::offset(INT_MAX));
+	if(len <= 0 || len > 16<<20) return;
+
+	uchar *data = new uchar[len];
+	media->seek(0, SEEK_SET);
+	media->read(data, len);
+
+	sendf(-1, 2, "rim", N_SENDDEMO, len, data);
+
+	delete media;
+	delete[] data;
+	}
+
     int laninfoport() { return SAUERBRATEN_LANINFO_PORT; }
     int serverinfoport(int servport) { return servport < 0 ? SAUERBRATEN_SERVINFO_PORT : servport+1; }
     int serverport(int infoport) { return infoport < 0 ? SAUERBRATEN_SERVER_PORT : infoport-1; }
@@ -3655,6 +4087,422 @@ namespace server
         return attr.length() && attr[0]==PROTOCOL_VERSION;
     }
 
+	
+	
+	
+	
+	
+ICOMMAND (setcampos, "ifff", (int *cn, float *yaw, float *pitch, float *roll), { 
+clientinfo *ci = getinfo(*cn); 
+if (!ci) return; 
+ci->pos.yaw = *yaw; 
+ci->pos.pitch = *pitch; 
+ci->pos.roll = *roll; 
+ci->pos.putposition(ci); 
+} 
+); 
+
+ICOMMAND(getyaw, "i", (int *cn), { 
+clientinfo *ci = getinfo(*cn); 
+if (!ci) return; 
+floatret(ci->pos.yaw); 
+} 
+); 
+
+
+ICOMMAND(getpitch, "i", (int *cn), { 
+clientinfo *ci = getinfo(*cn); 
+if (!ci) return; 
+floatret(ci->pos.pitch); 
+} 
+); 
+
+
+ICOMMAND(getroll, "i", (int *cn), { 
+clientinfo *ci = getinfo(*cn); 
+if (!ci) return; 
+floatret(ci->pos.roll); 
+} 
+); 
+
+ICOMMAND(getammo, "ii", (int* cn, int *gun), { 
+if (*gun >= NUMGUNS || *gun < 0) return; 
+clientinfo *ci = getinfo(*cn); 
+if (!ci) return; 
+intret(ci->state.ammo[*gun]); 
+}); 
+
+ICOMMAND(getgameclip, "i", (int *cn), { 
+clientinfo *ci = getinfo(*cn); 
+if (!ci) return; 
+intret(ci->pos.gameclip); 
+} 
+); 
+
+
+// fakesay 
+
+void fakesay(int *cn, char *name, char *message) { 
+clientinfo *ci = getinfo(*cn); 
+if(!ci) return; 
+flushserver(true); 
+uchar buf[MAXTRANS]; 
+ucharbuf b(buf, sizeof(buf)); 
+putint(b, N_TEXT); 
+sendstring(message, b); 
+
+packetbuf p(MAXTRANS, ENET_PACKET_FLAG_RELIABLE); 
+
+/* vector<clientinfo *> dup; 
+loopv(clients) { 
+if(!strcmp(clients[i]->name, name)) { 
+dup.add(clients[i]); 
+} 
+} 
+loopv(dup) { 
+char *_name = (char*)"unnamed"; 
+if(!strcmp(name, "unnamed")) { 
+_name = (char*)"unnamed_"; 
+} 
+putint(p, N_INITAI); 
+putint(p, dup[i]->clientnum); 
+putint(p, dup[i]->ownernum); 
+putint(p, AI_NONE); 
+putint(p, 1); 
+putint(p, dup[i]->playermodel); 
+sendstring(_name, p); 
+sendstring(dup[i]->team, p); 
+} */ 
+
+putint(p, N_INITAI); // RENAME 
+putint(p, ci->clientnum); 
+putint(p, ci->clientnum); 
+putint(p, AI_NONE); 
+putint(p, 1); 
+putint(p, ci->playermodel); 
+sendstring(name, p); 
+sendstring(ci->team, p); 
+
+putint(p, N_CLIENT); // TALK 
+putint(p, *cn); 
+putint(p, b.len); 
+p.put(buf, b.len); 
+
+putint(p, N_INITAI); // RENAME 
+putint(p, ci->clientnum); 
+putint(p, ci->clientnum); 
+putint(p, AI_NONE); 
+putint(p, 1); 
+putint(p, ci->playermodel); 
+sendstring(ci->name, p); 
+sendstring(ci->team, p); 
+
+/* loopv(dup) { 
+putint(p, N_INITAI); 
+putint(p, dup[i]->clientnum); 
+putint(p, dup[i]->ownernum); 
+putint(p, AI_NONE); 
+putint(p, 1); 
+putint(p, dup[i]->playermodel); 
+sendstring(dup[i]->name, p); 
+sendstring(dup[i]->team, p); 
+} */ 
+
+sendpacket(-1, 1, p.finalize()); 
+} 
+ICOMMAND(fakesay, "iss", (int *cn, char *name, char *message), fakesay(cn, name, message)); 
+
+	ICOMMAND(setarmourtype, "ii", (int *cn, int *type), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	ci->state.armourtype = *type; 
+	} 
+	); 
+
+	ICOMMAND(getfall, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->pos.falling.z); 
+	} 
+	); 
+
+	ICOMMAND(getphysstate, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->pos.physstate); 
+	} 
+	); 
+
+	ICOMMAND(getquad, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->state.quadmillis); 
+	} 
+	); 
+
+	ICOMMAND(getlife, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->state.lifesequence); 
+	} 
+	); 
+
+	ICOMMAND(getplayermodel, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->playermodel); 
+	} 
+	); 
+
+	ICOMMAND(getskill, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->state.skill); 
+	} 
+	); 
+
+	ICOMMAND(getaitype, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->state.aitype); 
+	} 
+	); 
+
+	ICOMMAND(getstate, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->state.state); 
+	} 
+	);	
+		
+
+	ICOMMAND(getmaxhealth, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->state.maxhealth); 
+	} 
+	); 
+
+	ICOMMAND(setweap, "iiiiiiiii", (int *cn, int *num1, int *num2, int *num3, int *num4, int *num5, int *num6, int *num7, int *num8), { 
+	clientinfo *ci = getinfo(*cn); 
+	gamestate &gs = ci->state; 
+	if (!ci) return; 
+	gs.gunselect = *num1; 
+	gs.ammo[0] = *num2; 
+	gs.ammo[1] = *num3; 
+	gs.ammo[2] = *num4; 
+	gs.ammo[3] = *num5; 
+	gs.ammo[4] = *num6; 
+	gs.ammo[5] = *num7; 
+	gs.ammo[6] = *num8; 
+
+	sendf(ci->ownernum, 1, "rii7v", N_SPAWNSTATE, ci->clientnum, gs.lifesequence, 
+	gs.health, gs.maxhealth, 
+	gs.armour, gs.armourtype, 
+	gs.gunselect, GUN_PISTOL-GUN_SG+1, &gs.ammo[GUN_SG]); 
+	gs.lastspawn = gamemillis; 
+
+	} 
+	); 
+
+	ICOMMAND(setplayer, "iiiiiiii", (int *cn, int *num1, int *num2, int *num3, int *num4), { 
+	clientinfo *ci = getinfo(*cn); 
+	gamestate &gs = ci->state; 
+	if (!ci) return; 
+	gs.health = *num1; 
+	gs.maxhealth = *num2; 
+	gs.armour = *num3; 
+	gs.armourtype = *num4; 
+
+	sendf(ci->ownernum, 1, "rii7v", N_SPAWNSTATE, ci->clientnum, gs.lifesequence, 
+	gs.health, gs.maxhealth, 
+	gs.armour, gs.armourtype, 
+	gs.gunselect, GUN_PISTOL-GUN_SG+1, &gs.ammo[GUN_SG]); 
+	gs.lastspawn = gamemillis; 
+
+	} 
+	); 
+
+	ICOMMAND(respawn, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	gamestate &gs = ci->state; 
+	if (!ci) return; 
+	sendf(ci->ownernum, 1, "rii7v", N_SPAWNSTATE, ci->clientnum, gs.lifesequence, 
+	gs.health, gs.maxhealth, 
+	gs.armour, gs.armourtype, 
+	gs.gunselect, GUN_PISTOL-GUN_SG+1, &gs.ammo[GUN_SG]); 
+	gs.lastspawn = gamemillis; 
+	} 
+	);
+
+	ICOMMAND(death, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	sendf(*cn, 1, "ri2x", N_FORCEDEATH, ci->clientnum, ci->clientnum); 
+	} 
+	);	
+	
+	
+	ICOMMAND(setfrags, "ii", (int *cn, int *frags), { 
+	clientinfo *ci = getinfo(*cn); 
+	gamestate &gs = ci->state; 
+	if (!ci) return; 
+	gs.frags = *frags;
+	}
+	);
+	
+	ICOMMAND(setdeaths, "ii", (int *cn, int *deaths), { 
+	clientinfo *ci = getinfo(*cn); 
+	gamestate &gs = ci->state; 
+	if (!ci) return; 
+	gs.deaths = *deaths;
+	}
+	);
+	
+	ICOMMAND(sendpush, "iiiii", (int *cn, int *force, int *x, int *y, int *z), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	sendf(-1, 1, "ri7", N_HITPUSH, ci->clientnum, 0, *force, *x, *y, *z); 
+	} 
+	); 
+
+	ICOMMAND(getvelx, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->pos.vel.x); 
+	} 
+	); 
+
+	ICOMMAND(getvely, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->pos.vel.y); 
+	} 
+	); 
+
+	ICOMMAND(getvelz, "i", (int *cn), { 
+	clientinfo *ci = getinfo(*cn); 
+	if (!ci) return; 
+	intret(ci->pos.vel.z); 
+	} 
+	);
+	
+	ICOMMAND(namemute, "ii", (int *cn, int *val), {
+	clientinfo *ci = getinfo(*cn);
+	if (!ci) return;
+	ci->namemute = *val ? true : false;
+	}
+	);
+	
+	
+	void sendvar(int *cn, const char *type, const char *var, const char *name) {
+		clientinfo *ci = getinfo(*cn);
+		if (!ci && *cn != -1) return;
+		vector<uchar> buf;
+		switch(type[0]) {
+			#define PS(TYPE) putint(buf, N_EDITVAR); putint(buf, TYPE); sendstring(var, buf)
+			case 'i': PS(ID_VAR); putint(buf, parseint(name)); break;
+			case 'f': PS(ID_FVAR); putfloat(buf, parsefloat(name)); break;
+			case 's': PS(ID_SVAR); sendstring(name, buf); break;
+			#undef PS
+			default: sendservmsgf("ret"); return ;
+		}
+		#define SEND(CN) \
+		packetbuf p(MAXTRANS, ENET_PACKET_FLAG_RELIABLE); \
+		putuint(p, N_CLIENT); \
+		putint(p, CN); \
+		putuint(p, buf.length()); \
+		p.put(buf.getbuf(), buf.length()); \
+		sendpacket(CN, 1, p.finalize());
+		if (ci && ci->state.aitype==AI_NONE) {SEND(ci->clientnum);}
+		else {
+			loopv(clients) {
+				clientinfo *ci = clients[i];
+				if(ci->state.aitype!=AI_NONE) continue;
+				SEND(ci->clientnum);
+			}
+		}
+	}
+
+	COMMAND(sendvar, "isss");
+
+#define ENTSET(ent, flag) \
+	ent.type = type; \
+	ent.o = vec(x, y, z); \
+	ent.attr1 = attr1; \
+	ent.attr2 = attr2; \
+	ent.attr3 = attr3; \
+	ent.attr4 = attr4; \
+	ent.attr5 = attr5; \
+	ent.serverside = flag //Other clients will not be able to change serverside ents
+
+	#define P(data) putint(entbuf, data);		
+	#define PUTENT(e) P(N_EDITENT) P(idx) P((int)(e.o.x*DMF)) P((int)(e.o.y*DMF)) P((int)(e.o.z*DMF)) \
+	P(e.type) P(e.attr1) P(e.attr2) P(e.attr3) P(e.attr4) P(e.attr5)
+
+
+	int newent(uchar type, float x, float y, float z, short attr1, short attr2, short attr3, short attr4, short attr5) {
+		static int idx = 0;	
+		if (type >= MAXENTTYPES  || type == ET_EMPTY) return -1;
+		
+		if (idx >= MAXENTS-1) idx = 0;
+		if (!ments.inrange(idx)) {
+			entity &e = ments.add();
+			ENTSET(e, true);
+			idx = ments.length()-1;
+		} else {
+			while (ments.inrange(idx)) {
+				if (ments[idx].type == ET_EMPTY) {ENTSET(ments[idx], true); break;}
+				else idx++;
+			}
+			if (idx >= MAXENTS) return -1; //Too many entities
+			else if (!ments.inrange(idx)) {
+				entity &e = ments.add();
+				ENTSET(e, true);
+			}
+		}
+
+		PUTENT(ments[idx]);
+
+		return idx++;
+	} //Сидел над этой фигнёй 4 часа, но оптимизировал её просто здоровски.
+
+	void entset(int idx, uchar type, float x, float y, float z, short attr1, short attr2, short attr3, short attr4, short attr5) {
+		if (!ments.inrange(idx)) return;
+		if (type == ET_EMPTY) {
+			if (ments[idx].type == ET_EMPTY) return;
+			ENTSET(ments[idx], false);
+		} else {ENTSET(ments[idx], true);}
+		PUTENT(ments[idx]);
+		while (ments.last().type==ET_EMPTY) {
+			ments.pop(); //remove last
+			if (ments.empty()) return;	
+		} 
+	}
+
+	ICOMMAND(newent, "ifffiiiii", (uchar *type, float *x, float *y, float *z, short *attr1, short *attr2, short *attr3, short *attr4, short *attr5), intret(newent(*type, *x, *y, *z, *attr1, *attr2, *attr3, *attr4, *attr5)));
+	ICOMMAND(entset, "iifffiiiii", (int *idx, uchar *type, float *x, float *y, float *z, short *attr1, short *attr2, short *attr3, short *attr4, short *attr5), entset(*idx, *type, *x, *y, *z, *attr1, *attr2, *attr3, *attr4, *attr5));
+	ICOMMAND(entget, "i", (int *idx), {
+		if (!ments.inrange(*idx)) {intret(-1); return;}
+		entity &e = ments[*idx];
+		defformatstring(res,
+			"%i %f %f %f %i %i %i %i %i", 
+			e.type, e.o.x, e.o.y, e.o.z, 
+			e.attr1, e.attr2, e.attr3, e.attr4, e.attr5		
+		);
+    	result(res);
+	});
+	ICOMMAND(entlock, "i", (int *idx), {
+		if(!ments.inrange(*idx)) {intret(-1); return;}
+		ments[*idx].serverside = true;
+		intret(*idx);
+	});
+	ICOMMAND(entunlock, "i", (int *idx), {
+		if(!ments.inrange(*idx)) {intret(-1); return;}
+		ments[*idx].serverside = false;
+		intret(*idx);
+	});
+	
+	
     #include "aiman.h"
 }
-

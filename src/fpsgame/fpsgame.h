@@ -211,6 +211,41 @@ namespace server
 
     extern int gamemillis, nextexceeded;
 
+    //MAXIM
+    extern int shotpushinit[NUMGUNS];
+    extern int hitpushinit[NUMGUNS];
+    extern int ammoinit[NUMGUNS];
+    extern int damageinit[NUMGUNS];
+
+    struct weapinfo {
+      int shotpush[NUMGUNS];
+      int hitpush[NUMGUNS];
+      int ammo[NUMGUNS];
+      int damage[NUMGUNS];
+
+      weapinfo() {reset();}
+
+      void reset() {
+        loopi(NUMGUNS) {
+          shotpush[i] = shotpushinit[i];
+          hitpush[i] = hitpushinit[i];
+          ammo[i] = ammoinit[i];
+          damage[i] = damageinit[i];
+        }
+      }
+    };
+
+    //MAXIM
+    struct physinfo {
+      uchar physstate;
+      float yaw, pitch, roll;
+      vec o, vel, falling;
+      bool gameclip;
+      
+      physinfo() : o(vec(0,0,0)) {}
+      void putposition(clientinfo* ci, int exclude);
+    };
+
     struct clientinfo
     {
         int clientnum, ownernum, connectmillis, sessionid, overflow;
@@ -238,10 +273,15 @@ namespace server
         void *authchallenge;
         int authkickvictim;
         char *authkickreason;
+		bool namemute;
 
         // remod
         //hashtable<const char *, char *> vars;
         remod::extinfo ext;
+
+        //MAXIM
+        physinfo pos, saved;
+        weapinfo weapons;
 
         clientinfo() : getdemo(NULL), getmap(NULL), clipboard(NULL), authchallenge(NULL), authkickreason(NULL) { reset(); }
         ~clientinfo() { events.deletecontents(); cleanclipboard(); cleanauth(); }
@@ -351,6 +391,7 @@ namespace server
             cleanclipboard();
             cleanauth();
             mapchange();
+			namemute = false;
         }
 
         int geteventmillis(int servmillis, int clientmillis)
