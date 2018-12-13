@@ -100,7 +100,6 @@ namespace remod
     void checkresume();
     int getteamscore(const char *team);
     bool isteamsequalscore();
-    bool isplayerssequalscore();
     void rename(int cn, const char* name);
     void sendmapto(int cn);
     bool iseditcommand(int type);

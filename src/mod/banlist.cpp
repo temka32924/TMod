@@ -52,27 +52,21 @@ namespace remod
             banlists.add(bl);
         }
 
-        // Try to find banlist by name. If banlist absent create new one if name is null
-        // or empty string return local banlist
         banlist* banmanager::getbanlist(char *name)
         {
-            // local banlist without name
-            if(!name || !name[0])
-            {
-                return banlists[0]; 
-            }
-                        
             banlist *bl = NULL;
-
-            // banlists[0]->name is always is null need to avoid it          
-            loopv(banlists)
-                if(banlists[i]->name && strcmp(banlists[i]->name, name))
-                {
-                    bl = banlists[i];
-                    break;
-                } 
-
-            return bl != NULL ? bl : new banlist(name);
+            if(name && name[0])
+            {
+                loopv(banlists)
+                    if(strcmp(banlists[i]->name, name))
+                    {
+                        bl = banlists[i];
+                        break;
+                    }
+            }
+            else bl = banlists[0]; // local banlist without name
+            if(bl == NULL) bl = new banlist(name); // create new banlist
+            return bl;
         }
 
         banlist* banmanager::localbanlist()
@@ -82,11 +76,14 @@ namespace remod
 
         baninfo* banmanager::getban(char *listname, size_t n)
         {
-            if(!banlistexists(listname)) return NULL;
-
-            banlist* bl = getbanlist(listname);
-            if(bl->bans.inrange(n))
-                return bl->bans[n];
+            if(banlistexists(listname))
+            {
+                banlist* bl = getbanlist(listname);
+                if(bl->bans.inrange(n))
+                    return bl->bans[n];
+                else
+                    return NULL;
+            }
             else
                 return NULL;
         }
@@ -120,22 +117,20 @@ namespace remod
 
             banlist *bl = getbanlist(listname);
             bl->add(b);
-
-            // if banlist with listname not exist then add to it
-            if(!banlistexists(listname)) {
-                banlists.add(bl);                                
-            }
         }
 
         bool banmanager::delban(char *listname, int id)
         {
-            if(!banlistexists(listname)) return false;
-            
-            banlist *bl = getbanlist(listname);
-            if(bl->bans.inrange(id))
+            if(banlistexists(listname))
             {
-                bl->bans.remove(id);
-                return true;
+                banlist *bl = getbanlist(listname);
+                if(bl->bans.inrange(id))
+                {
+                    bl->bans.remove(id);
+                    return true;
+                }
+                else
+                    return false;
             }
             else
                 return false;

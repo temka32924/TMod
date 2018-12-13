@@ -477,9 +477,9 @@ void writebans()
 // (c) 2011 Thomas
 bool loadents(const char *fname, vector<entity> &ents, uint *crc)
 {
-    string ogzname, entsname;
-    char * mapname = newstring(fname);
-    fixmapname(mapname);
+    string mapname, ogzname, entsname;
+    copystring(mapname, fname, 100);
+    cutogz(mapname);
     formatstring(ogzname, "%s/%s.ogz", remod::mapdir, mapname);
     formatstring(entsname, "%s/%s.ents", remod::mapdir, mapname);
     path(ogzname);
@@ -758,29 +758,6 @@ bool isteamsequalscore()
     return (goodscore == evilscore);
 }
 
-// Check if two top player have equal score
-bool isplayerssequalscore()
-{
-    int maxfrags = INT_MIN;
-    bool equalfrags = false;
-    
-    loopv(clients)
-    if(clients[i]->state.state != CS_SPECTATOR)
-    {
-        clientinfo *ci = clients[i];
-        if (ci->state.frags > maxfrags)
-        {
-            maxfrags = ci->state.frags;
-            equalfrags = false;
-        }
-        else if (ci->state.frags == maxfrags)
-            equalfrags = true;
-    }
-    
-    return equalfrags;
-}
-
-
 void rename(int cn, const char* name)
 {
     // don't rename bots
@@ -988,10 +965,6 @@ done:
     #define FLOODTRIGGERTIME 10000
     bool checkflood(clientinfo *ci, int type)
     {
-        // remod TODO: fix this function
-        // server muted after 21 day of uptime
-        return false;
-
         bool isflood = false;
         size_t floodmsg = floodtype(type);
         floodstate &fs = ci->state.ext.flood[floodmsg];
